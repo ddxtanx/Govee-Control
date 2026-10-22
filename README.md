@@ -50,11 +50,16 @@ minutes, optionally warming color temperature (`kelvin_start` → `kelvin`).
 - `POST /wake_up` — start/restart; body may override `room`, `minutes`, `brightness`, `kelvin_start`, `kelvin`
 - `DELETE /wake_up` — cancel
 
-**Auto-cancel:** while ramping the server polls the room's status every few
-seconds. If any light reports itself OFF (someone pressed the lamp button
-or used the Govee app), the ramp immediately cancels **and turns every
-light in the room off** — turning the lights off mid-sunrise is an explicit
-"no", and the sunrise must not steamroll it.
+**Auto-cancel:** while ramping, the server samples the room's status at
+least once a second and always immediately before each ramp step's
+brightness/color send. If any light reports itself OFF (someone pressed
+the lamp button or used the Govee app), the ramp immediately cancels,
+every light in the room is turned off, and the ramp worker **exits** —
+afterwards the server never touches those lights again and the user is
+free to set any state. The per-step check matters because real Govee
+lamps often power back on when they receive brightness/color commands
+while off; sampling before every send ensures your "off" is detected
+before the sunrise can re-ignite the lamp.
 
 ## One-call API (Shortcuts / NFC / scripts)
 
@@ -76,12 +81,18 @@ so a mistyped target is easy to fix from a shortcut.
 ## Testing
 
 `fake_device.py` is a fake UDP Govee device (listens on 4003, replies on
-4002) for testing without hardware — it self-exits after 60 s idle:
+4002) for testing without hardware — it self-exits after 60 s idle.
+`tests/fake_battle.py` is a variant that emulates real lamps which
+power back on when they receive brightness/color commands while off.
 
 ```sh
-python3 fake_device.py &
-GOVEE_CONFIG=test_config.json python3 govee_server.py &
-curl -s localhost:9091/refresh
+python3 fake_device.py 2> fake.log &                 # terminal 1
+GOVEE_CONFIG=test_config.json python3 govee_server.py  # terminal 2
+python3 tests/test_wake_cancel.py                    # terminal 3
+
+# off-vs-ramp fight (auto-cancel must win even vs re-igniting lamps):
+python3 tests/fake_battle.py 2> fake.log &
+FAKE_LOG=fake.log python3 tests/test_wake_battle.py
 ```
 
 ## Deploy (systemd)

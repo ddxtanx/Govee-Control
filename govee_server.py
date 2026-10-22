@@ -403,14 +403,19 @@ class WakeRamp:
     Linear brightness (and optional color-temperature) ramp across a set of
     devices, run on a background thread. A new ramp cancels the old one.
 
-    Mid-ramp, the target lights are polled for status: if one reports itself
-    OFF (someone pressed the lamp button or used the Govee app), the ramp
-    auto-cancels and all target lights are forced OFF — an explicit "no"
-    from the user must not be steamrollered by the sunrise.
+    Mid-ramp, the target lights' status is sampled at least once a second
+    and always immediately before each ramp step's brightness/color send:
+    if one reports itself OFF (someone pressed the lamp button or used the
+    Govee app), the ramp immediately auto-cancels, all target lights are
+    forced OFF, and the worker exits — an explicit "no" from the user must
+    not be steamrollered, and nothing may touch the lights afterwards.
+    Checking before every send also prevents real Govee lamps (which often
+    power back on when they receive brightness/color commands) from being
+    silently re-ignited between status samples.
     """
 
-    # how often to poll device status during a ramp (seconds)
-    OFF_CHECK_INTERVAL = 3.0
+    # minimum gap between status polls during a ramp (seconds)
+    OFF_CHECK_INTERVAL = 1.0
 
     def __init__(self, home: Home, defaults: dict):
         self.home = home
@@ -502,12 +507,22 @@ class WakeRamp:
 
         steps = 100
         interval = (minutes * 60.0) / steps
-        # watch for external power-off (lamp button / Govee app mid-ramp)
-        next_check = time.monotonic() + self.OFF_CHECK_INTERVAL
+        # watch for external power-off (lamp button / Govee app mid-ramp);
+        # checked before EVERY step's sends so a re-ignition cannot hide it
+        last_check = time.monotonic()
         try:
             for step in range(1, steps + 1):
                 if stop.is_set():
                     log.info("wake ramp cancelled")
+                    return
+                # every step checks status immediately before its sends:
+                # if the user turned a light off, abort BEFORE our own
+                # brightness/color commands can re-ignite it
+                last_check = time.monotonic()
+                if self._lights_off(devices):
+                    self._abort_lights_off(devices, stop)
+                    return
+                if stop.is_set():
                     return
                 bri = int(round(step / steps * target))
                 if k1 is not None:
@@ -524,10 +539,13 @@ class WakeRamp:
                     if stop.is_set():
                         log.info("wake ramp cancelled")
                         return
-                    if time.monotonic() >= next_check:
-                        next_check = time.monotonic() + self.OFF_CHECK_INTERVAL
+                    now = time.monotonic()
+                    if now - last_check >= self.OFF_CHECK_INTERVAL:
+                        last_check = now
                         if self._lights_off(devices):
                             self._abort_lights_off(devices, stop)
+                            return
+                        if stop.is_set():
                             return
                     time.sleep(min(0.2, max(0.0, end - time.monotonic())))
             with self._lock:
