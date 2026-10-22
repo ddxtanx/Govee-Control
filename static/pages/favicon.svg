@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- libre / CC0 original icon: a lightbulb emitting a rainbow -->
+  <defs>
+    <radialGradient id="glow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%"  stop-color="#fff7e0" stop-opacity="0.95"/>
+      <stop offset="55%" stop-color="#ffe9a8" stop-opacity="0.35"/>
+      <stop offset="100%" stop-color="#ffe9a8" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="glass" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%"  stop-color="#fffaf0"/>
+      <stop offset="100%" stop-color="#ffe3a6"/>
+    </linearGradient>
+  </defs>
+
+  <!-- rounded tile -->
+  <rect x="2" y="2" width="60" height="60" rx="16" fill="#141a23"/>
+  <rect x="2" y="2" width="60" height="60" rx="16" fill="none" stroke="#232b37" stroke-width="1"/>
+
+  <!-- warm light spill -->
+  <circle cx="32" cy="34" r="18" fill="url(#glow)"/>
+
+  <!-- rainbow halo (outer -> inner: red, orange, yellow, green, blue, violet) -->
+  <g fill="none" stroke-linecap="round" stroke-width="3">
+    <path d="M5 35 A27 27 0 0 1 59 35"  stroke="#ff6b6b"/>
+    <path d="M8 35 A24 24 0 0 1 56 35"  stroke="#ffa94d"/>
+    <path d="M11 35 A21 21 0 0 1 53 35" stroke="#ffd43b"/>
+    <path d="M14 35 A18 18 0 0 1 50 35" stroke="#51cf66"/>
+    <path d="M17 35 A15 15 0 0 1 47 35" stroke="#4dabf7"/>
+    <path d="M20 35 A12 12 0 0 1 44 35" stroke="#9775fa"/>
+  </g>
+
+  <!-- bulb glass -->
+  <circle cx="32" cy="35" r="10" fill="url(#glass)" stroke="#ffffff" stroke-opacity="0.4" stroke-width="1"/>
+  <!-- filament glow -->
+  <circle cx="32" cy="35" r="4.5" fill="#fff3cf"/>
+  <circle cx="32" cy="35" r="2" fill="#ffffff"/>
+
+  <!-- screw base -->
+  <rect x="26.5" y="44" width="11" height="8.5" rx="2.5" fill="#b9c0c9"/>
+  <line x1="28" y1="47"   x2="36" y2="47"   stroke="#8b93a1" stroke-width="1.2" stroke-linecap="round"/>
+  <line x1="28" y1="49.5" x2="36" y2="49.5" stroke="#8b93a1" stroke-width="1.2" stroke-linecap="round"/>
+</svg>

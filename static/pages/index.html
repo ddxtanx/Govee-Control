@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0e1116">
+<meta name="color-scheme" content="dark">
+<title>govee</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="icon" href="/favicon.ico" sizes="16x16 24x24 32x32 48x48 64x64">
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-title" content="govee">
+<meta name="apple-mobile-web-app-title" content="govee">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="application-name" content="govee">
+<meta name="description" content="Govee light controller">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+<div class="phone" id="phone">
+  <div class="topbar">
+    <div class="brand">govee<span class="tag">LAN</span></div>
+    <div class="top-actions">
+      <button class="icon-btn" data-action="refresh" title="Refresh status">⟳<i id="poll-dot"></i></button>
+      <button class="icon-btn" data-action="nav:settings" title="Settings">⚙</button>
+    </div>
+  </div>
+  <main id="view"></main>
+  <nav class="tabbar" id="tabbar">
+    <button data-action="nav:home"><span class="tico">🏠</span>Home</button>
+    <button data-action="nav:scenes"><span class="tico">✨</span>Scenes</button>
+    <button data-action="nav:settings"><span class="tico">⚙</span>Settings</button>
+  </nav>
+</div>
+<div id="toast"></div>
+
+<script src="js/app.js"></script>
+</body>
+</html>

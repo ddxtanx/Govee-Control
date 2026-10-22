@@ -1,0 +1,18 @@
+{
+  "devices": {
+    "living room lamp": "192.168.1.10",
+    "bedroom light 1": "192.168.1.11",
+    "bedroom light 2": "192.168.1.12"
+  },
+  "rooms": {
+    "living room": ["living room lamp"],
+    "bedroom": ["bedroom light 1", "bedroom light 2"]
+  },
+  "wake": {
+    "room": "bedroom",
+    "minutes": 15,
+    "kelvin_start": 2700,
+    "kelvin": 6500,
+    "target_brightness": 100
+  }
+}

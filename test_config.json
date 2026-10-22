@@ -1,0 +1,15 @@
+{
+  "devices": {
+    "fake lamp": "127.0.0.1"
+  },
+  "rooms": {
+    "bedroom": ["fake lamp"]
+  },
+  "wake": {
+    "room": "bedroom",
+    "minutes": 15,
+    "kelvin_start": 2700,
+    "kelvin": 6500,
+    "target_brightness": 100
+  }
+}

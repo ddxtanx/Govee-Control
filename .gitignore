@@ -1,0 +1,10 @@
+# local config holds real LAN device IPs — keep it out of the repo
+config.json
+
+# python
+__pycache__/
+*.pyc
+.venv/
+
+# scratch
+*.log

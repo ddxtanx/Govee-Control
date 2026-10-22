@@ -1,0 +1,45 @@
+#!/usr/bin/env python3
+"""Fake Govee device for local testing: listens on UDP 4003, replies to
+devStatus on UDP 4002, applies turn/brightness/colorwc to its state."""
+import json
+import socket
+import sys
+
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.settimeout(60.0)
+sock.bind(("0.0.0.0", 4003))
+state = {
+    "onOff": 1,
+    "brightness": 50,
+    "color": {"r": 200, "g": 150, "b": 100},
+    "colorTemInKelvin": 3000,
+}
+
+
+def rx(cmd, data, addr):
+    print(f"RX {cmd} {data} from {addr}", file=sys.stderr, flush=True)
+
+
+while True:
+    try:
+        payload, addr = sock.recvfrom(4096)
+    except socket.timeout:
+        break
+    try:
+        msg = json.loads(payload)["msg"]
+    except (KeyError, ValueError):
+        continue
+    cmd, data = msg["cmd"], msg.get("data", {})
+    rx(cmd, data, addr)
+    if cmd == "turn":
+        state["onOff"] = data["value"]
+    elif cmd == "brightness":
+        state["brightness"] = data["value"]
+    elif cmd == "colorwc":
+        state["color"] = data["color"]
+        state["colorTemInKelvin"] = data.get("colorTemInKelvin", 0)
+    if cmd == "devStatus":
+        sock.sendto(
+            json.dumps({"msg": {"cmd": "devStatus", "data": state}}).encode(),
+            ("127.0.0.1", 4002),
+        )
