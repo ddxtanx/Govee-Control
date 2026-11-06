@@ -262,14 +262,15 @@ function roomCard(room){
   const sub = room === "all"
     ? `${devs.length} lights · ${onCount} on`
     : `${devs.length} light${devs.length === 1 ? "" : "s"} · ${onCount} on`;
-  const allOn = devs.length > 0 && onCount === devs.length;
+  // a room counts as "on" when ANY of its lights are on
+  const anyOn = onCount > 0;
   return `
   <div class="room-card" data-action="room:${esc(room)}">
     <span class="rc-name">
-      <span class="dot${allOn ? " on" : ""}"></span>${room === "all" ? "All rooms" : esc(room)}
+      <span class="dot${anyOn ? " on" : ""}"></span>${room === "all" ? "All rooms" : esc(room)}
     </span>
     <div class="rc-sub">${sub}</div>
-    ${switchHtml("room", null, allOn, false, room)}
+    ${switchHtml("room", null, anyOn, false, room)}
   </div>`;
 }
 
@@ -481,7 +482,8 @@ function renderRoom(room){
   const ips = S.roomsMap[room] || [];
   const devs = S.devices.filter(d => ips.includes(d.ip));
   const onCount = devs.filter(d => d.on).length;
-  const on = onCount === devs.length && devs.length > 0;
+  // room "on" = ANY light on (switch still commands all-on / all-off)
+  const on = onCount > 0;
   const tint = devs.length ? css(deviceColor(devs[0])) : "#8b98a8";
   const k = devs.length && devs[0].kelvin > 0 ? devs[0].kelvin : 3500;
   const hue = S.hues[room] ?? 0;
@@ -500,7 +502,10 @@ function renderRoom(room){
   <div class="hero${on ? "" : " off"}" style="--tint:${tint}">
     <div class="hero-swatch" style="background:${tint}"></div>
     <div><h3>${esc(title)}</h3>
-      <p>${devs.length ? (on ? "All lights on" : onCount + " of " + devs.length + " on") : "No lights"}</p></div>
+      <p>${!devs.length ? "No lights"
+        : onCount === devs.length ? "All lights on"
+        : onCount > 0 ? onCount + " of " + devs.length + " on"
+        : "All lights off"}</p></div>
   </div>
   <div class="row" style="margin-top:10px">
     <span class="lbl">Power</span>
