@@ -46,6 +46,8 @@ Endpoints (JSON in/out):
   DELETE /wake_up               -> cancel the running ramp
   POST   /scan                  -> {subnet: "192.168.3.0/24"} probe
   POST   /config/reload         -> re-read config.json (hot add/remove lights)
+  POST   /identify              -> LAN-scan configured devices for their SKU
+  POST   /scale/auto            -> auto-compute brightness scales from lumens
 
 Error semantics (all bodies are JSON):
   400 - request body/target problem (unknown target, no controls given,
@@ -73,6 +75,7 @@ from flask import Flask, jsonify, request, send_from_directory
 from werkzeug.exceptions import BadRequest, MethodNotAllowed, NotFound
 
 DEVICE_PORT = 4003          # control + status queries go here
+DISCOVER_PORT = 4001        # LAN discovery/identify ("scan" cmd -> sku)
 RECV_PORT = 4002            # devices reply here (per Govee guide)
 RECV_TIMEOUT = 1.5          # seconds to wait for each pending status reply
 APP_HOST = os.environ.get("GOVEE_HOST", "0.0.0.0")
@@ -103,6 +106,15 @@ def _now_iso():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+# Rated lumen output by Govee SKU (from Govee product pages). Not
+# exhaustive on purpose: for anything not listed, put "lumens": <lm>
+# on the device in config.json (the spec sheet / Govee app has it) and
+# POST /scale/auto will still do the math.
+SKU_LUMENS = {
+    "H6010": 1200,   # BR30 RGBWW bulb
+}
+
+
 # ----------------------------------------------------------------------------
 # Device
 # ----------------------------------------------------------------------------
@@ -117,6 +129,11 @@ class Device:
     # Applied only to room/control/ramp fan-out, never to this device's
     # own per-device controls, which stay raw.
     scale: float = 1.0
+    # optional rated lumen output (lm) from config; when set and "scale"
+    # was not given explicitly, bulk scale is computed as lmin/lumens
+    lumens: Optional[int] = None
+    sku: Optional[str] = None        # model id from LAN scan/devStatus
+    scale_explicit: bool = False     # config carried an explicit scale
 
     on: Optional[bool] = None
     brightness: Optional[int] = None
@@ -150,6 +167,9 @@ class Device:
         self.on = payload.get("onOff", 0) == 1
         self.brightness = payload.get("brightness")
         self.temp = payload.get("colorTemInKelvin", 0)
+        sku = payload.get("sku")
+        if sku:
+            self.sku = sku          # some firmwares include it in devStatus
         c = payload.get("color") or {}
         self.color = (
             c.get("r", 0),
@@ -221,6 +241,8 @@ class Device:
             "rgb": list(self.color),
             "online": self.online,
             "scale": self.scale,
+            "sku": self.sku,
+            "lumens": self.lumens,
             "last_seen": self.last_seen,
         }
 
@@ -261,6 +283,21 @@ class Home:
                         key, scale)
         return float(_clamp(scale, 0.05, 2.0))
 
+    @staticmethod
+    def _parse_lumens(key, raw) -> Optional[int]:
+        if raw is None:
+            return None
+        try:
+            lm = int(raw)
+        except (TypeError, ValueError):
+            log.warning("device %r: bad lumens %r, ignoring", key, raw)
+            return None
+        if lm <= 0:
+            log.warning("device %r: lumens %r must be > 0, ignoring",
+                        key, lm)
+            return None
+        return lm
+
     def apply_config(self, cfg: dict):
         """
         (Re)build device/room/name tables from a config dict.
@@ -270,16 +307,19 @@ class Home:
         A device may instead be a dict to add calibration:
             "bath flood": {"ip": "192.168.1.11", "scale": 0.7}
         scale (default 1.0) is the relative perceived-brightness factor
-        applied to room-level (bulk) brightness commands.
-        The legacy format ("<ip>": {"name": ..., "scale": ...}) is still
-        accepted. Room lists may use names or IPs.
+        applied to room-level (bulk) brightness commands. Or give the
+        fixture's rated output:
+            "bath flood": {"ip": "192.168.1.11", "lumens": 1600}
+        and scale is auto-computed (dimmest known / own) at config load.
+        The legacy format ("<ip>": {"name": ..., "scale": ...,
+        "lumens": ...}) is also accepted. Room lists may use names or IPs.
         """
         devices_cfg = cfg.get("devices", {})
         rooms_cfg = cfg.get("rooms", {})
 
-        parsed: dict[str, tuple[str, float]] = {}   # ip -> (name, scale)
+        parsed: dict[str, tuple] = {}   # ip -> (name, scale, lumens, explicit)
         for key, val in devices_cfg.items():
-            scale = 1.0
+            scale, lumens, explicit = 1.0, None, False
             if isinstance(val, str):
                 name, ip = key, val.strip()
             elif isinstance(val, dict):
@@ -288,6 +328,8 @@ class Home:
                 else:                              # legacy "<ip>": {...}
                     ip, name = key, (val or {}).get("name", "")
                 scale = self._parse_scale(key, val.get("scale"))
+                explicit = val.get("scale") is not None
+                lumens = self._parse_lumens(key, val.get("lumens"))
             else:
                 log.warning("ignoring malformed device entry %r: %r", key, val)
                 continue
@@ -301,16 +343,19 @@ class Home:
                 log.warning("device %s: second name %r for same IP ignored",
                             ip, name)
                 continue
-            parsed[ip] = (name, scale)
+            parsed[ip] = (name, scale, lumens, explicit)
 
         new_devices: dict[str, Device] = {}
-        for ip, (name, scale) in parsed.items():
+        for ip, (name, scale, lumens, explicit) in parsed.items():
             if ip in self.devices:
                 dev = self.devices[ip]          # keep runtime state
                 dev.name = name
                 dev.scale = scale
+                dev.lumens = lumens
+                dev.scale_explicit = explicit
             else:
-                dev = Device(ip=ip, name=name, scale=scale)
+                dev = Device(ip=ip, name=name, scale=scale,
+                             lumens=lumens, scale_explicit=explicit)
             new_devices[ip] = dev
 
         removed = set(self.devices) - set(new_devices)
@@ -342,12 +387,43 @@ class Home:
             new_rooms["all"] = list(new_devices.values())
         self.rooms = new_rooms
 
+        self._auto_scale()
+
         for ip in removed:
             log.info("device %s removed from config", ip)
         log.info(
             "config applied: %d devices, rooms: %s",
             len(self.devices), ", ".join(self.rooms),
         )
+
+    def _auto_scale(self):
+        """
+        Perceptual matching across calibrated fixtures.
+
+        A fixture's effective output at bulk % P is P * lumens * scale.
+        Manual scales are perceptual observations, so they participate
+        in the baseline: the anchor is the smallest effective lumen
+        output among devices with known lumens (manual: lumens*scale,
+        auto: lumens), and every auto device normalizes to it. One
+        coherent axis: manually dimmed fixtures genuinely do look
+        dimmer, and auto-scaled lights must match THAT, not their
+        spec-sheet numbers.
+
+        Manual scales themselves are never overwritten. A device with
+        a manual scale but no "lumens" stays off the axis entirely
+        (its raw % scaling is untouched and it cannot contribute an
+        anchor) — that's the escape hatch for one-off trims like a
+        nightlight puck that shouldn't drag the whole room dim.
+        """
+        known = [d for d in self.devices.values() if d.lumens]
+        if not known:
+            return
+        anchor = min(d.lumens * d.scale if d.scale_explicit else d.lumens
+                     for d in known)
+        for d in known:
+            if d.scale_explicit:
+                continue
+            d.scale = float(_clamp(round(anchor / d.lumens, 2), 0.05, 2.0))
 
     # --- lookup ---------------------------------------------------------------
 
@@ -421,6 +497,55 @@ class Home:
         for ip in pending:
             results[ip] = "no-reply"
         return results
+
+    def identify(self, devices: Optional[list[Device]] = None) -> dict:
+        """
+        Ask devices for their model: the LAN "scan" packet goes to :4001
+        (unicast — same return path as status replies on :4002, so it
+        works under iot-zone firewall policies that block multicast).
+        Replies carry {ip, device(mac), sku}. Returns {ip: sku}.
+        """
+        if devices is None:
+            devices = list(self.devices.values())
+        if not devices:
+            return {}
+        found: dict[str, str] = {}
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        pkt = json.dumps({"msg": {"cmd": "scan",
+                                  "data": {"account_topic": "reserve"}}}
+                         ).encode()
+        with self._recv_lock:
+            self._recv.settimeout(0)
+            try:
+                while True:
+                    self._recv.recvfrom(4096)
+            except (socket.timeout, BlockingIOError, OSError):
+                pass
+            for d in devices:
+                probe.sendto(pkt, (d.ip, DISCOVER_PORT))
+
+            deadline = time.monotonic() + RECV_TIMEOUT * 2
+            while time.monotonic() < deadline:
+                remaining = deadline - time.monotonic()
+                self._recv.settimeout(min(remaining, 1.0))
+                try:
+                    payload, addr = self._recv.recvfrom(4096)
+                except (socket.timeout, BlockingIOError, OSError):
+                    continue
+                try:
+                    data = json.loads(payload)["msg"].get("data") or {}
+                except (KeyError, ValueError, TypeError):
+                    continue
+                sku = data.get("sku")
+                if not sku:
+                    continue
+                found[addr[0]] = sku
+                dev = self.devices.get(addr[0])
+                if dev is not None and dev.sku != sku:
+                    dev.sku = sku
+                    log.info("identified %s as %s", addr[0], sku)
+        probe.close()
+        return found
 
     def get_devices(self):
         return list(self.devices.values())
@@ -1052,6 +1177,51 @@ def scan():
 
 
 # --- config ----------------------------------------------------------------------
+
+@app.post("/identify")
+def identify():
+    """LAN-scan devices for their SKU (model id). Optional target."""
+    body = _body()
+    target = body.get("device") or body.get("room")
+    devices = _target_from(body) if target else list(home.devices.values())
+    found = home.identify(devices)
+    return jsonify({"skus": found,
+                    "devices": [d.state() for d in devices]})
+
+
+@app.post("/scale/auto")
+def scale_auto():
+    """
+    Compute brightness scale factors automatically: identify any device
+    with no SKU, resolve lumens (config "lumens" wins, else SKU_LUMENS
+    table), then scale = dimmest_known/own so bulk room brightness
+    lands evenly. Explicit config "scale" always wins. Runtime-only —
+    persist by adding "lumens" to config.json (suggested below).
+    """
+    body = _body()
+    identified = home.identify() if body.get("identify", True) else {}
+    table_hits = {}
+    for d in home.devices.values():
+        if d.lumens is None and d.sku and d.sku in SKU_LUMENS:
+            d.lumens = SKU_LUMENS[d.sku]
+            table_hits[d.ip] = d.sku
+    home._auto_scale()
+    return jsonify({
+        "identified": identified,
+        "table_hits": table_hits,
+        "scales": [
+            {"ip": d.ip, "name": d.name, "sku": d.sku,
+             "lumens": d.lumens, "scale": d.scale,
+             "effective_lumens": (round(d.lumens * d.scale)
+                                  if d.lumens else None),
+             "status": ("manual+anchor" if d.scale_explicit and d.lumens
+                        else "manual (off-axis)" if d.scale_explicit
+                        else "auto" if d.lumens
+                        else "unknown: add \"lumens\" to config")}
+            for d in home.devices.values()
+        ],
+    })
+
 
 @app.post("/config/reload")
 def config_reload():

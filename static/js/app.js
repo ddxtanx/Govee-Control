@@ -484,6 +484,52 @@ function renderRoom(room){
   const onCount = devs.filter(d => d.on).length;
   // room "on" = ANY light on (switch still commands all-on / all-off)
   const on = onCount > 0;
+  const cals = devs.filter(d => d.lumens > 0);
+  const lmMode = devs.length > 0 && cals.length === devs.length;
+  let briPanel;
+  if (lmMode){
+    // calibrated room: slider axis is emitted lumens, not raw %.
+    // anchor = smallest effective output (lumens*scale), so the
+    // equalized point is the same lumens value the server normalizes
+    // to; each light saturates exactly at its rated lumens.
+    const anchor = Math.max(1, Math.min(...cals.map(d => d.lumens * d.scale)));
+    const Ls = cals.map(d => d.lumens).sort((a, b) => a - b);
+    const maxL = Ls[Ls.length - 1];
+    const cur = Math.round(Math.max(...cals.map(
+      d => (d.brightness ?? 0) / 100 * d.lumens)));
+    const GREEN = "#43a06b", ORANGE = "#d9913f", RED = "#c25d5d";
+    const n = Ls.length;
+    let prev = 0;
+    const stops = [];
+    for (let z = 0; z < n; z++){
+      const end = z === n - 1 ? 100 : 100 * Ls[z] / maxL;
+      const col = n === 1 ? GREEN : z === 0 ? GREEN : z === n - 1 ? RED : ORANGE;
+      stops.push(`${col} ${prev.toFixed(1)}% ${end.toFixed(1)}%`);
+      prev = end;
+    }
+    const note = Ls.map((L, i) =>
+      `${L} lm: ${n - i} light${n - i === 1 ? "" : "s"}`).join(" · ");
+    briPanel = `
+  <div class="panel">
+    <div class="panel-head"><span class="t">Brightness</span>
+      <span class="val" id="val-bri">${cur} lm</span></div>
+    <input type="range" min="0" max="${maxL}" step="10" value="${cur}"
+      data-el="bri" data-room="${esc(room)}" data-lmscale="${anchor}">
+    <div class="lmbands"
+      style="background:linear-gradient(90deg,${stops.join(",")})"></div>
+    <div class="kelvin-labels"><span>0 lm</span><span>${maxL} lm</span></div>
+    <p class="lmnote">${note} — green: all chase; orange/red: lights
+      pin out at their max one by one.</p>
+  </div>`;
+  } else {
+    briPanel = `
+  <div class="panel">
+    <div class="panel-head"><span class="t">Brightness</span>
+      <span class="val" id="val-bri">${devs.length ? (devs[0].brightness ?? 0) + "%" : "0%"}</span></div>
+    <input type="range" min="0" max="100" value="${devs.length ? (devs[0].brightness ?? 50) : 50}"
+      data-el="bri" data-room="${esc(room)}">
+  </div>`;
+  }
   const tint = devs.length ? css(deviceColor(devs[0])) : "#8b98a8";
   const k = devs.length && devs[0].kelvin > 0 ? devs[0].kelvin : 3500;
   const hue = S.hues[room] ?? 0;
@@ -511,12 +557,7 @@ function renderRoom(room){
     <span class="lbl">Power</span>
     ${switchHtml("power", null, on, true, room)}
   </div>
-  <div class="panel">
-    <div class="panel-head"><span class="t">Brightness</span>
-      <span class="val" id="val-bri">${devs.length ? (devs[0].brightness ?? 0) + "%" : "0%"}</span></div>
-    <input type="range" min="0" max="100" value="${devs.length ? (devs[0].brightness ?? 50) : 50}"
-      data-el="bri" data-room="${esc(room)}">
-  </div>
+  ${briPanel}
   <div class="panel">
     <div class="panel-head"><span class="t">White temperature</span>
       <span class="val" id="val-kelvin">${devs.length && devs[0].kelvin > 0 ? devs[0].kelvin + "K" : "—"}</span></div>
@@ -599,6 +640,14 @@ function renderSettings(){
     <button class="btn sm" data-action="scan">Scan</button>
   </div>
   <pre class="results" id="scan-results" style="display:none"></pre>
+  <div class="set-row">
+    <div class="grow"><b>Brightness calibration</b>
+      <p>Identify models over the LAN and auto-compute brightness
+        scales from lumens. For models the server doesn't know, add
+        "lumens": &lt;lm&gt; to the device in config.json.</p></div>
+    <button class="btn sm" data-action="autoscale">Identify + auto-scale</button>
+  </div>
+  <pre class="results" id="scale-results" style="display:none"></pre>
   <div class="set-row">
     <div class="grow"><b>Config</b><p>Re-read config.json (hot add/remove lights).</p></div>
     <button class="btn sm" data-action="reload">Reload</button>
@@ -695,13 +744,22 @@ async function doScene(s, ip, room){
   afterAction();
 }
 
+// lumens-axis sliders (data-lmscale=anchor) convert the requested lm
+// back into the server's normalized % axis; bulk brightness may exceed
+// 100 — each light clamps at its own max (the slider's red zone)
+function briValue(el){
+  return el.dataset.lmscale
+    ? Math.round(100 * +el.value / +el.dataset.lmscale)
+    : +el.value;
+}
+
 async function onControl(el, final = false){
   const elKind = el.dataset.el;
   const ip = el.dataset.ip;
   const room = el.dataset.room;
   let body;
   if (elKind === "power") body = {on: el.checked};
-  else if (elKind === "bri") body = {brightness: +el.value};
+  else if (elKind === "bri") body = {brightness: briValue(el)};
   else if (elKind === "kelvin") body = {kelvin: +el.value};
   else if (elKind === "room") body = {on: el.checked};
   else return;
@@ -714,7 +772,7 @@ async function onControl(el, final = false){
     // sliders: continuous updates while dragging (120ms throttle, same as
     // the wheel); the release (change) passes final=true so the exact last
     // value is always sent.
-    const patch = elKind === "bri" ? {brightness: +el.value} : {kelvin: +el.value};
+    const patch = elKind === "bri" ? {brightness: briValue(el)} : {kelvin: +el.value};
     patchTarget(room || ip, !!room, patch);
     ctrlSend(path, body, (room || ip) + ":" + elKind, final);
     return;
@@ -766,6 +824,23 @@ async function doScan(){
       : "no Govee devices answered";
   }catch(e){
     box.textContent = "scan failed: " + e.message;
+  }
+}
+
+async function doAutoScale(){
+  const box = $("#scale-results");
+  box.style.display = "block";
+  box.textContent = "identifying models over LAN…";
+  toast("identifying + auto-scaling…");
+  try{
+    const r = await api("/scale/auto", {method: "POST", body: {}});
+    box.textContent = r.scales.map(s =>
+      `${(s.name || s.ip).padEnd(16)} sku=${s.sku || "?"} ` +
+      `lm=${s.lumens ?? "-"} scale=${s.scale} ${s.status}`).join("\n")
+      + "\n\nadd \"lumens\": <lm> to config.json to persist auto-scales";
+    poll();
+  }catch(e){
+    box.textContent = "auto-scale failed: " + e.message;
   }
 }
 
@@ -959,6 +1034,7 @@ phone.addEventListener("click", e => {
   }
   if (act === "wake"){ doWake(arg); return; }
   if (act === "scan"){ doScan(); return; }
+  if (act === "autoscale"){ doAutoScale(); return; }
   if (act === "reload"){ doReload(); return; }
 });
 
@@ -978,7 +1054,8 @@ phone.addEventListener("input", e => {
   const el = e.target;
   if (el.type !== "range") return;
   S.dragging = true;
-  if (el.dataset.el === "bri") $("#val-bri").textContent = el.value + "%";
+  if (el.dataset.el === "bri")
+    $("#val-bri").textContent = el.value + (el.dataset.lmscale ? " lm" : "%");
   if (el.dataset.el === "kelvin") $("#val-kelvin").textContent = el.value + "K";
   if (el.dataset.el === "bri" || el.dataset.el === "kelvin"){
     // continuous updates while dragging (throttled to ~120ms, same as the wheel)
@@ -992,6 +1069,16 @@ window.addEventListener("online", poll);
 /* ============================== boot ================================ */
 
 (async function boot(){
+  // deep links: #room:bedroom, #settings, #scenes
+  const hm = (location.hash || "").match(/^#(room|settings|scenes)(?::(.+))?$/);
+  if (hm){
+    if (hm[1] === "room" && hm[2]){
+      S.selectedRoom = decodeURIComponent(hm[2]);
+      S.view = "room";
+    } else if (hm[1] !== "room"){
+      S.view = hm[1];
+    }
+  }
   try{
     await loadCore();
   }catch(e){

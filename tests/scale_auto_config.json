@@ -1,0 +1,15 @@
+{
+  "devices": {
+    "flood A": {"ip": "127.0.0.1", "lumens": 1600},
+    "bulb B": "127.0.0.2",
+    "manual C": {"ip": "127.0.0.3", "scale": 0.5, "lumens": 400},
+    "trim D": {"ip": "127.0.0.4", "scale": 0.3}
+  },
+  "rooms": {
+    "bathroom": ["flood A", "bulb B"]
+  },
+  "wake": {
+    "room": "bathroom",
+    "minutes": 15
+  }
+}

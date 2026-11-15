@@ -43,6 +43,35 @@ hand). Tune by eye: start around 0.65–0.75 for floodlights and adjust
 until the room reads even. Apply changes without restarting via
 `POST /config/reload`.
 
+#### Auto-scaling from device models
+
+Give fixtures their rated output instead and the server does the math:
+
+```json
+"devices": {
+  "bath flood": { "ip": "192.168.1.12", "lumens": 1600 },
+  "bath bulb":  "192.168.1.13"
+}
+```
+
+- `POST /identify` (or the Settings → *Identify + auto-scale* button)
+  queries each light's SKU with a LAN `scan` packet on port 4001
+  (unicast — works under the same firewall rules as status).
+- `POST /scale/auto` resolves lumens from your config or its built-in
+  SKU table, then normalizes every auto device to the smallest
+  *effective* output (`lumens × scale`) among calibrated lights. A
+  manual `scale` on a lumens-known fixture participates in that
+  baseline — your by-eye trim is ground truth — and is never
+  overwritten. A manual `scale` without `lumens` stays off the axis
+  entirely (escape hatch for one-off trims like a nightlight puck).
+- Auto-scales recompute at config load, so persist them by adding the
+  `"lumens"` values to config.json.
+
+In a fully calibrated room, the room brightness slider switches to a
+**lumens axis** with banded zones: green where every light keeps
+pace, orange/red where fixtures pin out at their rated max and fewer
+lights follow.
+
 ### Environment variables
 
 | Variable | Default | Meaning |
