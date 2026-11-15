@@ -30,10 +30,10 @@ PAGES = {
         "<div>150 lm per meter</div></body></html>"),
 }
 SEARCH = {
-    "FLOODX": ('<a data-j="/products/flood-light">x</a>'
-               '{"url":"/products/refurbished-flood-light"}'
-               '{"url":"/products/flood-light"}'),
-    "NOISY": '{"url":"/products/noisy-strip"}',
+    "FLOODX": ('{"url":"http://127.0.0.1:9093/products/refurbished-flood-light"}'
+               '{"image":"https://cdn.shopify.com/s/files/products/H5179.jpg",'
+               '"url":"http://127.0.0.1:9093/products/flood-light"}'),
+    "NOISY": '{"url":"http://127.0.0.1:9093/products/noisy-strip"}',
 }
 
 

@@ -1,25 +1,56 @@
 #!/usr/bin/env python3
 """On-the-fly lumens lookup against a (fake) govee.com storefront.
 
-Rig:
-  python3 tests/fake_govee_site.py &                     # :9093
-  python3 tests/fake_ip.py 127.0.0.1 FLOODX 2> fA.log &
-  python3 tests/fake_ip.py 127.0.0.2 H6010   2> fB.log &
-  python3 tests/fake_ip.py 127.0.0.3 NOISY   2> fC.log &
-  GOVEE_SITE=http://127.0.0.1:9093 \
-  GOVEE_LUMENS_CACHE=/tmp/pwtest/lumens_cache.json \
-  GOVEE_CONFIG=tests/lookup_config.json python3 govee_server.py
+Self-contained: spawns the whole rig (fake storefront, three fake
+lights, server) as subprocesses, runs, tears down. Point at an
+external rig instead with GOVEE_RIG=external.
 """
 import json
 import os
 import re
+import subprocess
 import sys
+import time
 import urllib.request
 
 BASE = os.environ.get("GOVEE_URL", "http://localhost:9091")
-LOG_A = os.environ.get("FAKE_LOG_A", "fA.log")
-LOG_B = os.environ.get("FAKE_LOG_B", "fB.log")
-CACHE = os.environ.get("GOVEE_LUMENS_CACHE", "/tmp/pwtest/lumens_cache.json")
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+LOG_DIR = os.environ.get("GOVEE_LOGDIR", "/tmp/pwtest")
+os.makedirs(LOG_DIR, exist_ok=True)
+LOG_A = os.path.join(LOG_DIR, "fA.log")
+LOG_B = os.path.join(LOG_DIR, "fB.log")
+CACHE = os.environ.get("GOVEE_LUMENS_CACHE",
+                       os.path.join(LOG_DIR, "lumens_cache.json"))
+
+rig = []
+log_files = []
+if os.environ.get("GOVEE_RIG") != "external":
+    py = sys.executable
+    fake_cmds = [
+        (LOG_A, [py, os.path.join(HERE, "fake_ip.py"), "127.0.0.1", "FLOODX"]),
+        (LOG_B, [py, os.path.join(HERE, "fake_ip.py"), "127.0.0.2", "H6010"]),
+        (None,  [py, os.path.join(HERE, "fake_ip.py"), "127.0.0.3", "NOISY"]),
+        (None,  [py, os.path.join(HERE, "fake_govee_site.py")]),
+    ]
+    for logfile, cmd in fake_cmds:
+        fh = open(logfile, "w") if logfile else subprocess.DEVNULL
+        if logfile:
+            log_files.append(fh)
+        rig.append(subprocess.Popen(cmd, stderr=fh))
+    env = dict(os.environ,
+               GOVEE_SITE="http://127.0.0.1:9093",
+               GOVEE_LUMENS_CACHE=CACHE,
+               GOVEE_CONFIG=os.path.join(HERE, "lookup_config.json"),
+               GOVEE_PORT="9091")
+    rig.append(subprocess.Popen([py, os.path.join(ROOT, "govee_server.py")],
+                                env=env, stderr=subprocess.DEVNULL))
+    for _ in range(50):
+        try:
+            urllib.request.urlopen(BASE + "/healthz", timeout=1)
+            break
+        except Exception:
+            time.sleep(0.2)
 
 
 def api(path, method="GET", body=None):
@@ -91,4 +122,6 @@ check("room 80% -> bulb Y raw 80", vb == [80], f"B={vb}")
 
 print()
 print("RESULT:", "ALL PASS" if not fails else f"FAILURES: {fails}")
+for p in rig:
+    p.terminate()
 sys.exit(1 if fails else 0)

@@ -125,6 +125,8 @@ def _now_iso():
 # persisted to lumens_cache.json, which you can edit by hand.
 SKU_LUMENS: dict[str, int] = {
     "H6010": 1200,   # BR30 RGBWW bulb
+    "H6004": 800,    # A19/A60 RGBWW bulb (delisted; spec corroborated
+                     # across retailer listings + manual)
 }
 
 _LM_PATTERNS = (
@@ -251,18 +253,24 @@ def lookup_lumens(sku: str) -> Optional[dict]:
         log.warning("lumens lookup for %s failed: %s", sku, e)
         return None
     try:
-        # results are embedded as JSON, not plain hrefs: take every
-        # distinct /products/<slug> reference on the page
+        # results appear as absolute URLs whose FIRST path segment is
+        # /products/ (ld+json / embedded JSON); requiring that excludes
+        # cdn.shopify.com image URLs like .../s/files/products/X.jpg
+        # and relative nav links
         links: list[str] = []
-        for m in re.finditer(r"/products/[a-zA-Z0-9][a-zA-Z0-9-]*",
-                             search_html):
-            u = m.group(0)
+        for m in re.finditer(
+                r"https?://[^/\"']+(/products/[a-zA-Z0-9][a-zA-Z0-9-]*)",
+                search_html):
+            u = m.group(1)
             if "refurbished" not in u and u not in links:
                 links.append(u)
         tried = []
         for link in links[:3]:
             url = GOVEE_SITE + link
-            page = _http_get(url)
+            try:
+                page = _http_get(url)
+            except urllib.error.HTTPError:
+                continue        # dead candidate page, try next
             tried.append(url)
             if sku.upper() not in page.upper():
                 continue        # wrong product page, try next result
