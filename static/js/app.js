@@ -497,18 +497,33 @@ function renderRoom(room){
     const maxL = Ls[Ls.length - 1];
     const cur = Math.round(Math.max(...cals.map(
       d => (d.brightness ?? 0) / 100 * d.lumens)));
-    const GREEN = "#43a06b", ORANGE = "#d9913f", RED = "#c25d5d";
+    // segments between UNIQUE lumens cutoffs; each segment records how
+    // many lights still chase through it. A light at its cutoff value
+    // pins out (holds at max) for everything above that value.
     const n = Ls.length;
-    let prev = 0;
-    const stops = [];
-    for (let z = 0; z < n; z++){
-      const end = z === n - 1 ? 100 : 100 * Ls[z] / maxL;
-      const col = n === 1 ? GREEN : z === 0 ? GREEN : z === n - 1 ? RED : ORANGE;
-      stops.push(`${col} ${prev.toFixed(1)}% ${end.toFixed(1)}%`);
-      prev = end;
+    const cutoffs = [];
+    for (const L of Ls){
+      const last = cutoffs[cutoffs.length - 1];
+      if (last && last.L === L) last.n++;
+      else cutoffs.push({L, n: 1});
     }
-    const note = Ls.map((L, i) =>
-      `${L} lm: ${n - i} light${n - i === 1 ? "" : "s"}`).join(" · ");
+    const segs = [];
+    let lower = 0, chase = n;
+    for (const c of cutoffs){
+      segs.push({from: lower, to: c.L, chase});
+      chase -= c.n;
+      lower = c.L;
+    }
+    if (chase > 0 && lower < maxL) segs.push({from: lower, to: maxL, chase});
+    const GREEN = "#43a06b", ORANGE = "#d9913f", RED = "#c25d5d";
+    const stops = segs.map(s => {
+      const col = s.chase === n ? GREEN : s.chase / n >= 0.5 ? ORANGE : RED;
+      const end = s.to >= maxL ? 100 : 100 * s.to / maxL;
+      return `${col} ${s.from === 0 ? 0 : 100 * s.from / maxL}% ${end}%`;
+    });
+    const note = segs.map(s =>
+      `${s.from}-${s.to} lm: ${s.chase}`).join(" · ") +
+      " — lights hold at max past their mark";
     briPanel = `
   <div class="panel">
     <div class="panel-head"><span class="t">Brightness</span>
@@ -518,8 +533,7 @@ function renderRoom(room){
     <div class="lmbands"
       style="background:linear-gradient(90deg,${stops.join(",")})"></div>
     <div class="kelvin-labels"><span>0 lm</span><span>${maxL} lm</span></div>
-    <p class="lmnote">${note} — green: all chase; orange/red: lights
-      pin out at their max one by one.</p>
+    <p class="lmnote">${note}</p>
   </div>`;
   } else {
     briPanel = `
