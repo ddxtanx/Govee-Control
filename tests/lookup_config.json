@@ -1,0 +1,14 @@
+{
+  "devices": {
+    "flood X": "127.0.0.1",
+    "bulb Y": "127.0.0.2",
+    "noisy Z": "127.0.0.3"
+  },
+  "rooms": {
+    "bathroom": ["flood X", "bulb Y"]
+  },
+  "wake": {
+    "room": "bathroom",
+    "minutes": 15
+  }
+}

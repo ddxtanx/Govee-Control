@@ -64,9 +64,13 @@ import ipaddress
 import json
 import logging
 import os
+import re
 import socket
 import threading
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional
@@ -84,6 +88,16 @@ API_KEY = os.environ.get("GOVEE_API_KEY")   # optional; unset = no auth
 CONFIG_PATH = os.environ.get(
     "GOVEE_CONFIG",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json"),
+)
+
+# Govee's own storefront is queried directly for lumen specs (it is
+# server-rendered — no JS, no third party). Override for region, e.g.
+# https://govee.co.uk. Set GOVEE_SITE="" to disable web lookups.
+GOVEE_SITE = os.environ.get("GOVEE_SITE", "https://us.govee.com").rstrip("/")
+LUMENS_CACHE_PATH = os.environ.get(
+    "GOVEE_LUMENS_CACHE",
+    os.path.join(os.path.dirname(os.path.abspath(CONFIG_PATH)),
+                 "lumens_cache.json"),
 )
 STATIC_DIR = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "static",
@@ -106,13 +120,192 @@ def _now_iso():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-# Rated lumen output by Govee SKU (from Govee product pages). Not
-# exhaustive on purpose: for anything not listed, put "lumens": <lm>
-# on the device in config.json (the spec sheet / Govee app has it) and
-# POST /scale/auto will still do the math.
-SKU_LUMENS = {
+# Rated lumen output by Govee SKU. Just an offline seed now: unknown
+# SKUs are resolved on the fly via SEARXNG_URL (see lookup_lumens) and
+# persisted to lumens_cache.json, which you can edit by hand.
+SKU_LUMENS: dict[str, int] = {
     "H6010": 1200,   # BR30 RGBWW bulb
 }
+
+_LM_PATTERNS = (
+    re.compile(r"(\d[\d,]{0,5})\s*(?:lm|lumens?)\b", re.I),
+    re.compile(r"(?:lumens?|lumen output)\s*[:=]\s*(\d[\d,]{0,5})", re.I),
+)
+
+
+def _lm_candidates(text: str) -> list[int]:
+    out = []
+    for rx in _LM_PATTERNS:
+        for m in rx.finditer(text):
+            try:
+                v = int(m.group(1).replace(",", ""))
+            except ValueError:
+                continue
+            if 50 <= v <= 20000:      # sane lamp range
+                out.append(v)
+    return out
+
+
+def _http_get(url: str, timeout: float = 15.0, retries: int = 1) -> str:
+    last: Exception = RuntimeError("no attempt")
+    for _ in range(retries + 1):
+        try:
+            req = urllib.request.Request(url, headers={
+                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) "
+                              "Chrome/130.0 Safari/537.36"})
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return r.read().decode("utf-8", "replace")
+        except urllib.error.HTTPError:
+            raise                     # 404 etc. is an answer, not a fault
+        except Exception as e:        # govee.com can be slow; retry once
+            last = e
+    raise last
+
+
+def _lm_votes(html: str) -> dict[int, int]:
+    """lumen figures from visible text nodes and meta/title, as votes"""
+    votes: dict[int, int] = {}
+    texts = []
+    for m in re.finditer(r"<title[^>]*>([^<]*)</title>", html):
+        texts.append(m.group(1))
+    for m in re.finditer(r'<meta[^>]+name="description"[^>]+content="([^"]*)"', html):
+        texts.append(m.group(1))
+    for m in re.finditer(r">\s*([^<>]{0,90}?(?:lumens?|\blm\b)[^<>]{0,90}?)\s*<",
+                         html, re.I):
+        texts.append(m.group(1))
+    for t in texts:
+        for lm in set(_lm_candidates(t)):
+            votes[lm] = votes.get(lm, 0) + 1
+    return votes
+
+
+def _ld_json(page: str) -> list:
+    """all script type=application/ld+json blocks, parsed"""
+    out = []
+    for m in re.finditer(
+            r'<script type="application/ld\+json"[^>]*>(.*?)</script>',
+            page, re.S):
+        try:
+            d = json.loads(m.group(1))
+            out.extend(d if isinstance(d, list) else [d])
+        except ValueError:
+            continue
+    return out
+
+
+def _lm_from_ld(blocks: list, sku: str) -> dict[int, int]:
+    """
+    Govee publishes schema.org ProductGroup/Product JSON-LD on every
+    product page — the vendor's own machine-readable spec contract
+    (what search engines consume). Prefer that over visible-text
+    scraping. Lumens ride in the variant names ("... 1200lm") and the
+    description ("Model: H6010 ...").
+    """
+    def walk(x):
+        if isinstance(x, str):
+            yield x
+        elif isinstance(x, dict):
+            for v in x.values():
+                yield from walk(v)
+        elif isinstance(x, list):
+            for v in x:
+                yield from walk(v)
+
+    for b in blocks:
+        if b.get("@type") not in ("ProductGroup", "Product"):
+            continue
+        if sku.upper() not in json.dumps(b).upper():
+            continue
+        votes: dict[int, int] = {}
+        for t in walk(b):
+            for lm in set(_lm_candidates(t)):
+                votes[lm] = votes.get(lm, 0) + 1
+        return votes
+    return {}
+
+
+def lookup_lumens(sku: str) -> Optional[dict]:
+    """
+    Ask Govee's own site for the SKU's rated lumens (privacy: the only
+    thing sent is the SKU string, to govee.com):
+      1. {GOVEE_SITE}/search?q=<sku>  -> product page links (SSR)
+      2. product page -> parse the published schema.org ProductGroup
+         JSON-LD (spec contract); if it carries no lumens, fall back
+         to voting on visible-text lumen mentions
+    Marketing copy is noisy, so: require the page to mention the SKU
+    AND either a single unanimous figure or >=2 agreeing mentions;
+    otherwise return candidates + URL for a human to confirm.
+    Cached afterwards. Returns None on network failure.
+    """
+    if not GOVEE_SITE:
+        return None
+    try:
+        search_html = _http_get(
+            f"{GOVEE_SITE}/search?q={urllib.parse.quote(sku)}")
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            # govee.com 404s searches with no product hits (discontinued
+            # or not sold in this region) — an honest "unknown"
+            return {"lumens": None, "votes": 0, "sources": [],
+                    "candidates": []}
+        log.warning("lumens lookup for %s failed: %s", sku, e)
+        return None
+    try:
+        # results are embedded as JSON, not plain hrefs: take every
+        # distinct /products/<slug> reference on the page
+        links: list[str] = []
+        for m in re.finditer(r"/products/[a-zA-Z0-9][a-zA-Z0-9-]*",
+                             search_html):
+            u = m.group(0)
+            if "refurbished" not in u and u not in links:
+                links.append(u)
+        tried = []
+        for link in links[:3]:
+            url = GOVEE_SITE + link
+            page = _http_get(url)
+            tried.append(url)
+            if sku.upper() not in page.upper():
+                continue        # wrong product page, try next result
+            votes = _lm_from_ld(_ld_json(page), sku)
+            if not votes:
+                votes = _lm_votes(page)
+            if not votes:
+                continue
+            top = max(votes, key=votes.get)
+            confident = len(votes) == 1 or max(votes.values()) >= 2
+            return {"lumens": top if confident else None,
+                    "votes": votes.get(top, 0),
+                    "sources": [url],
+                    "candidates": sorted(votes)}
+        return {"lumens": None, "votes": 0, "sources": tried[:1],
+                "candidates": []}
+    except Exception as e:
+        log.warning("lumens lookup for %s failed: %s", sku, e)
+        return None
+
+
+def _load_lumens_cache() -> dict:
+    try:
+        with open(LUMENS_CACHE_PATH) as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as e:
+        log.warning("lumens cache unreadable (%s): %s",
+                    LUMENS_CACHE_PATH, e)
+        return {}
+
+
+def _save_lumens_cache(cache: dict):
+    try:
+        tmp = LUMENS_CACHE_PATH + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(cache, f, indent=2, sort_keys=True)
+        os.replace(tmp, LUMENS_CACHE_PATH)
+        log.info("lumens cache updated: %s", LUMENS_CACHE_PATH)
+    except OSError as e:
+        log.warning("cannot write lumens cache: %s", e)
 
 
 # ----------------------------------------------------------------------------
@@ -1193,22 +1386,46 @@ def identify():
 def scale_auto():
     """
     Compute brightness scale factors automatically: identify any device
-    with no SKU, resolve lumens (config "lumens" wins, else SKU_LUMENS
-    table), then scale = dimmest_known/own so bulk room brightness
-    lands evenly. Explicit config "scale" always wins. Runtime-only —
-    persist by adding "lumens" to config.json (suggested below).
+    with no SKU, resolve lumens (config "lumens" wins, then the seed
+    table, then lumens_cache.json, then a live lookup against Govee's
+    own site), then scale = dimmest effective / own so bulk room
+    brightness lands evenly. Explicit config "scale" always wins.
+    Persist web-found values by copying them into config.json as
+    "lumens" (or trust lumens_cache.json, which survives restarts).
     """
     body = _body()
     identified = home.identify() if body.get("identify", True) else {}
-    table_hits = {}
+    cache = _load_lumens_cache()
+    new_entries = False
+    resolved: dict[str, str] = {}
     for d in home.devices.values():
-        if d.lumens is None and d.sku and d.sku in SKU_LUMENS:
+        if d.lumens is not None or not d.sku:
+            continue
+        if d.sku in SKU_LUMENS:
             d.lumens = SKU_LUMENS[d.sku]
-            table_hits[d.ip] = d.sku
+            resolved[d.ip] = "seed table"
+        elif d.sku in cache:
+            d.lumens = int(cache[d.sku])
+            resolved[d.ip] = "cache"
+        else:
+            r = lookup_lumens(d.sku)
+            if r and r.get("lumens"):
+                d.lumens = r["lumens"]
+                cache[d.sku] = r["lumens"]
+                new_entries = True
+                resolved[d.ip] = f"web, {r['votes']} agreeing hits"
+            elif r:
+                cands = "/".join(map(str, r["candidates"][:3])) or "none"
+                src = r["sources"][0] if r["sources"] else "no results"
+                resolved[d.ip] = (f"web unsure (candidates {cands}; "
+                                  f"check {src}) — set \"lumens\" in config")
+    if new_entries:
+        _save_lumens_cache(cache)
     home._auto_scale()
     return jsonify({
         "identified": identified,
-        "table_hits": table_hits,
+        "resolved": resolved,
+        "lookup_source": GOVEE_SITE or None,
         "scales": [
             {"ip": d.ip, "name": d.name, "sku": d.sku,
              "lumens": d.lumens, "scale": d.scale,

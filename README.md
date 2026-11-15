@@ -57,11 +57,17 @@ Give fixtures their rated output instead and the server does the math:
 - `POST /identify` (or the Settings → *Identify + auto-scale* button)
   queries each light's SKU with a LAN `scan` packet on port 4001
   (unicast — works under the same firewall rules as status).
-- `POST /scale/auto` resolves lumens from your config or its built-in
-  SKU table, then normalizes every auto device to the smallest
-  *effective* output (`lumens × scale`) among calibrated lights. A
-  manual `scale` on a lumens-known fixture participates in that
-  baseline — your by-eye trim is ground truth — and is never
+- `POST /scale/auto` resolves lumens: config `"lumens"` wins, else a
+  small seed table, else `lumens_cache.json`, else a live query
+  against Govee's own storefront — SKU into its site search, then the
+  **schema.org JSON-LD** block every product page publishes (the
+  vendor's machine-readable spec contract, not layout scraping; only
+  the SKU string leaves your network). Figures are only auto-applied
+  when unanimous or corroborated — otherwise you get candidates + the
+  URL to confirm. Then it normalizes every auto device to the
+  smallest *effective* output (`lumens × scale`) among calibrated
+  lights. A manual `scale` on a lumens-known fixture participates in
+  that baseline — your by-eye trim is ground truth — and is never
   overwritten. A manual `scale` without `lumens` stays off the axis
   entirely (escape hatch for one-off trims like a nightlight puck).
 - Auto-scales recompute at config load, so persist them by adding the
@@ -79,6 +85,8 @@ lights follow.
 | `GOVEE_CONFIG` | `config.json` next to the script | config path |
 | `GOVEE_PORT` / `GOVEE_HOST` | `9091` / `0.0.0.0` | web bind |
 | `GOVEE_API_KEY` | unset | when set, `X-Api-Key` header is required on write requests |
+| `GOVEE_SITE` | `https://us.govee.com` | storefront for lumens lookup; `""` disables web lookups |
+| `GOVEE_LUMENS_CACHE` | `lumens_cache.json` next to config | persisted SKU→lumens findings, hand-editable |
 | `GOVEE_LOGLEVEL` | `INFO` | logging |
 
 ## The UI
