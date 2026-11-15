@@ -2,11 +2,13 @@
   "devices": {
     "living room lamp": "192.168.1.10",
     "bedroom light 1": "192.168.1.11",
-    "bedroom light 2": "192.168.1.12"
+    "bath flood": {"ip": "192.168.1.12", "scale": 0.7},
+    "bath bulb": "192.168.1.13"
   },
   "rooms": {
     "living room": ["living room lamp"],
-    "bedroom": ["bedroom light 1", "bedroom light 2"]
+    "bedroom": ["bedroom light 1"],
+    "bathroom": ["bath flood", "bath bulb"]
   },
   "wake": {
     "room": "bedroom",

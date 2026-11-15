@@ -23,6 +23,26 @@ python3 govee_server.py              # requires: pip install flask
 
 `config.json` is gitignored on purpose — it holds your real LAN addresses.
 
+### Brightness calibration (mixed hardware in one room)
+
+The LAN protocol's brightness is a raw 0–100 value, not a measured
+luminance — a floodlight and a bulb at "60%" can look very different.
+Give brighter fixtures a per-device `scale` factor so **bulk** commands
+(room controls, scenes, wake ramp, `/control`) land evenly:
+
+```json
+"devices": {
+  "bath flood": { "ip": "192.168.1.12", "scale": 0.7 },
+  "bath bulb":  "192.168.1.13"
+}
+```
+
+A room-level 60% then sends 42 to the flood and 60 to the bulb
+(device slider controls stay raw, so you can still trim one lamp by
+hand). Tune by eye: start around 0.65–0.75 for floodlights and adjust
+until the room reads even. Apply changes without restarting via
+`POST /config/reload`.
+
 ### Environment variables
 
 | Variable | Default | Meaning |

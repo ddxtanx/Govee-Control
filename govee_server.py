@@ -111,6 +111,12 @@ def _now_iso():
 class Device:
     ip: str
     name: str = ""
+    # brightness calibration: relative perceived-output factor.
+    # A floodlight brighter than a bulb at the same raw % gets scale < 1
+    # (e.g. 0.7) so room-level ("bulk") brightness commands land evenly.
+    # Applied only to room/control/ramp fan-out, never to this device's
+    # own per-device controls, which stay raw.
+    scale: float = 1.0
 
     on: Optional[bool] = None
     brightness: Optional[int] = None
@@ -168,6 +174,10 @@ class Device:
         self._send("brightness", {"value": brightness})
         self.brightness = brightness
 
+    def norm_brightness(self, pct: int) -> int:
+        """Raw value to send for a normalized (bulk) brightness request."""
+        return int(_clamp(round(pct * self.scale), 0, 100))
+
     def set_color(self, rgb: tuple, kelvin: int):
         """
         rgb: (r, g, b) 0-255.
@@ -210,6 +220,7 @@ class Device:
             "kelvin": self.temp,
             "rgb": list(self.color),
             "online": self.online,
+            "scale": self.scale,
             "last_seen": self.last_seen,
         }
 
@@ -236,24 +247,47 @@ class Home:
 
     # --- configuration --------------------------------------------------------
 
+    @staticmethod
+    def _parse_scale(key, raw) -> float:
+        if raw is None:
+            return 1.0
+        try:
+            scale = float(raw)
+        except (TypeError, ValueError):
+            log.warning("device %r: bad scale %r, using 1.0", key, raw)
+            return 1.0
+        if not 0.05 <= scale <= 2.0:
+            log.warning("device %r: scale %r out of 0.05..2.0, clamped",
+                        key, scale)
+        return float(_clamp(scale, 0.05, 2.0))
+
     def apply_config(self, cfg: dict):
         """
         (Re)build device/room/name tables from a config dict.
 
         The "devices" section maps names to IPs:
             "living room lamp": "192.168.1.10"
-        The legacy format ("<ip>": {"name": ...}) is still accepted.
-        Room lists may use names or IPs.
+        A device may instead be a dict to add calibration:
+            "bath flood": {"ip": "192.168.1.11", "scale": 0.7}
+        scale (default 1.0) is the relative perceived-brightness factor
+        applied to room-level (bulk) brightness commands.
+        The legacy format ("<ip>": {"name": ..., "scale": ...}) is still
+        accepted. Room lists may use names or IPs.
         """
         devices_cfg = cfg.get("devices", {})
         rooms_cfg = cfg.get("rooms", {})
 
-        parsed: dict[str, str] = {}   # ip -> name
+        parsed: dict[str, tuple[str, float]] = {}   # ip -> (name, scale)
         for key, val in devices_cfg.items():
+            scale = 1.0
             if isinstance(val, str):
                 name, ip = key, val.strip()
-            elif isinstance(val, dict):            # legacy format
-                ip, name = key, (val or {}).get("name", "")
+            elif isinstance(val, dict):
+                if "ip" in val:                    # {"ip":..., "scale":...}
+                    name, ip = key, str(val.get("ip", "")).strip()
+                else:                              # legacy "<ip>": {...}
+                    ip, name = key, (val or {}).get("name", "")
+                scale = self._parse_scale(key, val.get("scale"))
             else:
                 log.warning("ignoring malformed device entry %r: %r", key, val)
                 continue
@@ -267,15 +301,16 @@ class Home:
                 log.warning("device %s: second name %r for same IP ignored",
                             ip, name)
                 continue
-            parsed[ip] = name
+            parsed[ip] = (name, scale)
 
         new_devices: dict[str, Device] = {}
-        for ip, name in parsed.items():
+        for ip, (name, scale) in parsed.items():
             if ip in self.devices:
                 dev = self.devices[ip]          # keep runtime state
                 dev.name = name
+                dev.scale = scale
             else:
-                dev = Device(ip=ip, name=name)
+                dev = Device(ip=ip, name=name, scale=scale)
             new_devices[ip] = dev
 
         removed = set(self.devices) - set(new_devices)
@@ -530,7 +565,7 @@ class WakeRamp:
                     for d in devices:
                         d.set_kelvin(kelvin)
                 for d in devices:
-                    d.set_brightness(bri)
+                    d.set_brightness(d.norm_brightness(bri))
                 with self._lock:
                     self._state["current_brightness"] = bri
                 # sleep in small slices so cancellation is prompt
@@ -646,12 +681,18 @@ def _parse_rgb(value) -> Optional[tuple]:
     return None
 
 
-def _apply_controls(devices: list[Device], body: dict) -> dict:
+def _apply_controls(devices: list[Device], body: dict,
+                    normalize: bool = False) -> dict:
     """
     Accepts any of: on (bool), brightness (int), kelvin (int),
     rgb ([r,g,b]). Order of sends: power -> color -> brightness, so a
     brightness-only request never changes color, and turning on with a
     color lands the light in the right state.
+
+    normalize=True applies each device's configured brightness scale,
+    so one requested % lands perceptually even across mixed hardware
+    (room bulk commands, /control, wake ramp). Per-device requests
+    stay raw.
     """
     sent = []
     on = body.get("on")
@@ -674,8 +715,9 @@ def _apply_controls(devices: list[Device], body: dict) -> dict:
 
     brightness = body.get("brightness")
     if brightness is not None:
+        b = int(brightness)
         for d in devices:
-            d.set_brightness(int(brightness))
+            d.set_brightness(d.norm_brightness(b) if normalize else b)
         sent.append(f"brightness={int(brightness)}")
 
     if not sent:
@@ -892,14 +934,14 @@ def control_room(room):
     if devs is None:
         raise _http_error(NotFound, f"unknown room {room!r}",
                           _known_targets())
-    return jsonify(_apply_controls(devs, _body()))
+    return jsonify(_apply_controls(devs, _body(), normalize=True))
 
 
 @app.post("/control")
 def control():
     body = _body()
     devices = _target_from(body)
-    return jsonify(_apply_controls(devices, body))
+    return jsonify(_apply_controls(devices, body, normalize=True))
 
 
 # --- wake ramp -----------------------------------------------------------------
