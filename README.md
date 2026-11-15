@@ -70,8 +70,12 @@ Give fixtures their rated output instead and the server does the math:
   that baseline — your by-eye trim is ground truth — and is never
   overwritten. A manual `scale` without `lumens` stays off the axis
   entirely (escape hatch for one-off trims like a nightlight puck).
-- Auto-scales recompute at config load, so persist them by adding the
-  `"lumens"` values to config.json.
+- Auto-scales recompute at config load, and *Identify + auto-scale*
+  now writes the resolved `"lumens"` values straight back into
+  config.json (the previous file is kept as `config.json.bak`; your
+  own `scale` keys and the rest of the file are untouched). The file
+  becomes the source of truth — pass `{"persist": false}` to skip the
+  write.
 
 In a fully calibrated room, the room brightness slider switches to a
 **lumens axis** with banded zones: green where every light keeps

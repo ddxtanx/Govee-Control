@@ -8,6 +8,7 @@ external rig instead with GOVEE_RIG=external.
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -25,6 +26,10 @@ CACHE = os.environ.get("GOVEE_LUMENS_CACHE",
 
 rig = []
 log_files = []
+# the server now WRITES its config (lumens write-back) — run against a
+# copy, never the repo fixture
+RIG_CFG = os.path.join(LOG_DIR, "rig_config.json")
+shutil.copyfile(os.path.join(HERE, "lookup_config.json"), RIG_CFG)
 if os.environ.get("GOVEE_RIG") != "external":
     py = sys.executable
     fake_cmds = [
@@ -49,7 +54,7 @@ if os.environ.get("GOVEE_RIG") != "external":
                GOVEE_SITE="http://127.0.0.1:9093",
                GOVEE_REGIONS="http://127.0.0.1:9094",
                GOVEE_LUMENS_CACHE=CACHE,
-               GOVEE_CONFIG=os.path.join(HERE, "lookup_config.json"),
+               GOVEE_CONFIG=RIG_CFG,
                GOVEE_PORT="9091")
     rig.append(subprocess.Popen([py, os.path.join(ROOT, "govee_server.py")],
                                 env=env, stderr=subprocess.DEVNULL))
@@ -127,6 +132,26 @@ cache = json.load(open(CACHE))
 check("cache persisted resolved web finds only",
       cache == {"FLOODX": 1600, "REFURBX": 1500, "DELISTX": 1300},
       str(cache))
+
+written = res.get("written") or []
+check("config write-back reports the four resolved devices",
+      sorted(written) == ["bulb Y", "delisted V", "flood X", "refurb W"],
+      str(written))
+cfg2 = json.load(open(RIG_CFG))
+check("lumens written into config device entries",
+      cfg2["devices"]["flood X"] == {"ip": "127.0.0.1", "lumens": 1600}
+      and cfg2["devices"]["bulb Y"] == {"ip": "127.0.0.2", "lumens": 1200}
+      and cfg2["devices"]["refurb W"]["lumens"] == 1500
+      and cfg2["devices"]["delisted V"]["lumens"] == 1300,
+      json.dumps(cfg2["devices"]))
+check("unresolved devices stay plain string entries",
+      cfg2["devices"]["noisy Z"] == "127.0.0.3"
+      and cfg2["devices"]["decoy U"] == "127.0.0.7")
+check("rooms + wake preserved; original kept as .bak",
+      cfg2["rooms"] == {"bathroom": ["flood X", "bulb Y"]}
+      and cfg2.get("wake")
+      and open(RIG_CFG + ".bak").read()
+      == open(os.path.join(HERE, "lookup_config.json")).read())
 
 mA = len(open(LOG_A).read().splitlines())
 mB = len(open(LOG_B).read().splitlines())

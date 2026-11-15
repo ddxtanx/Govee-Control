@@ -836,8 +836,15 @@ async function doAutoScale(){
     const r = await api("/scale/auto", {method: "POST", body: {}});
     box.textContent = r.scales.map(s =>
       `${(s.name || s.ip).padEnd(16)} sku=${s.sku || "?"} ` +
-      `lm=${s.lumens ?? "-"} scale=${s.scale} ${s.status}`).join("\n")
-      + "\n\nadd \"lumens\": <lm> to config.json to persist auto-scales";
+      `lm=${s.lumens ?? "-"} scale=${s.scale} ${s.status}`).join("\n");
+    if ((r.written || []).length){
+      box.textContent += "\n\nwrote lumens into config.json for: "
+        + r.written.join(", ") + "  (backup: config.json.bak)";
+    }
+    if (r.scales.some(s => s.status.startsWith("unknown"))){
+      box.textContent += "\nthe rest: add \"lumens\": <lm> to config.json "
+        + "and POST /config/reload";
+    }
     poll();
   }catch(e){
     box.textContent = "auto-scale failed: " + e.message;

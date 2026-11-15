@@ -58,7 +58,9 @@ check("identify bulb B -> H6010",
       res["skus"].get("127.0.0.2") == "H6010")
 
 # 2. anchor = min effective lumens INCLUDING manual C (400*0.5 = 200)
-res = api("/scale/auto", "POST", {"identify": False})
+# (persist: false — scale/auto now writes lumens into its config; keep
+# the repo fixture read-only here, the write-back has its own coverage)
+res = api("/scale/auto", "POST", {"identify": False, "persist": False})
 by_ip = {s["ip"]: s for s in res["scales"]}
 check("B lumens from SKU table", by_ip["127.0.0.2"]["lumens"] == 1200)
 check("manual C unchanged (0.5, participates as anchor)",

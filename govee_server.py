@@ -65,6 +65,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import socket
 import threading
 import time
@@ -368,6 +369,62 @@ def _save_lumens_cache(cache: dict):
         log.info("lumens cache updated: %s", LUMENS_CACHE_PATH)
     except OSError as e:
         log.warning("cannot write lumens cache: %s", e)
+
+
+def persist_lumens() -> list[str]:
+    """
+    Write each device's resolved lumens into config.json so the
+    calibration is the file's own truth instead of resting on the
+    seed table or lumens_cache.json. Entries gain a "lumens" key;
+    the plain "name": "ip" form is upgraded to
+    {"ip": ..., "lumens": ...}. Manual "scale" keys and everything
+    else in the file are left exactly as written (the file is
+    re-indented, content preserved). The immediately previous file
+    is kept as config.json.bak. Returns the device names written.
+    """
+    try:
+        with open(CONFIG_PATH, encoding="utf-8") as f:
+            raw = json.load(f)
+    except (OSError, ValueError) as e:
+        log.warning("cannot read config for lumens write-back: %s", e)
+        return []
+    devs = raw.get("devices")
+    if not isinstance(devs, dict):
+        return []
+    written = []
+    for d in home.devices.values():
+        if d.lumens is None:
+            continue
+        key = d.name
+        entry = devs.get(key)
+        if entry is None and isinstance(devs.get(d.ip), dict) and \
+                devs[d.ip].get("name") == d.name:
+            key, entry = d.ip, devs[d.ip]      # legacy ip-keyed form
+        if isinstance(entry, str):
+            entry = {"ip": entry}
+            devs[key] = entry
+        if not isinstance(entry, dict) or entry.get("lumens") == d.lumens:
+            continue
+        entry["lumens"] = d.lumens
+        written.append(d.name)
+    if not written:
+        return []
+    try:
+        tmp = CONFIG_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(raw, f, indent=2)
+            f.write("\n")
+        try:
+            shutil.copyfile(CONFIG_PATH, CONFIG_PATH + ".bak")
+        except OSError:
+            pass
+        os.replace(tmp, CONFIG_PATH)
+    except OSError as e:
+        log.warning("cannot write lumens into config: %s", e)
+        return []
+    log.info("lumens written into %s: %s", CONFIG_PATH,
+             ", ".join(written))
+    return written
 
 
 # ----------------------------------------------------------------------------
@@ -1452,8 +1509,9 @@ def scale_auto():
     table, then lumens_cache.json, then a live lookup against Govee's
     own site), then scale = dimmest effective / own so bulk room
     brightness lands evenly. Explicit config "scale" always wins.
-    Persist web-found values by copying them into config.json as
-    "lumens" (or trust lumens_cache.json, which survives restarts).
+    Resolved lumens are written back into config.json (entries gain a
+    "lumens" key, previous file kept as config.json.bak) so the file
+    is the source of truth; pass {"persist": false} to skip writing.
     """
     body = _body()
     identified = home.identify() if body.get("identify", True) else {}
@@ -1485,9 +1543,11 @@ def scale_auto():
     if new_entries:
         _save_lumens_cache(cache)
     home._auto_scale()
+    written = persist_lumens() if body.get("persist", True) else []
     return jsonify({
         "identified": identified,
         "resolved": resolved,
+        "written": written,
         "lookup_source": GOVEE_SITE or None,
         "scales": [
             {"ip": d.ip, "name": d.name, "sku": d.sku,
