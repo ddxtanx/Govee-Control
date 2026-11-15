@@ -94,6 +94,13 @@ CONFIG_PATH = os.environ.get(
 # server-rendered — no JS, no third party). Override for region, e.g.
 # https://govee.co.uk. Set GOVEE_SITE="" to disable web lookups.
 GOVEE_SITE = os.environ.get("GOVEE_SITE", "https://us.govee.com").rstrip("/")
+# Other Govee-run storefronts tried when the primary store has no hit —
+# SKUs get delisted regionally but often live on at another regional
+# store or in Govee's own refurb archive.
+GOVEE_REGIONS = [s.rstrip("/") for s in os.environ.get(
+    "GOVEE_REGIONS",
+    "https://eu.govee.com,https://uk.govee.com,https://ca.govee.com,"
+    "https://mea.govee.com").split(",") if s.strip()]
 LUMENS_CACHE_PATH = os.environ.get(
     "GOVEE_LUMENS_CACHE",
     os.path.join(os.path.dirname(os.path.abspath(CONFIG_PATH)),
@@ -120,13 +127,17 @@ def _now_iso():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-# Rated lumen output by Govee SKU. Just an offline seed now: unknown
-# SKUs are resolved on the fly via SEARXNG_URL (see lookup_lumens) and
+# Rated lumen output by Govee SKU: verified figures for models Govee's
+# own stores no longer expose to search (delisted everywhere, or
+# discoverable only in their refurb archive). Unknown SKUs are resolved
+# on the fly against Govee's storefronts (see lookup_lumens) and
 # persisted to lumens_cache.json, which you can edit by hand.
 SKU_LUMENS: dict[str, int] = {
     "H6010": 1200,   # BR30 RGBWW bulb
-    "H6004": 800,    # A19/A60 RGBWW bulb (delisted; spec corroborated
-                     # across retailer listings + manual)
+    "H6004": 800,    # A19/A60 RGBWW bulb (delisted everywhere; 800 lm
+                     # corroborated across retailer listings + manual)
+    "H607C": 1725,   # Floor Lamp 2 (us.govee.com refurb page: "1725
+                     # lumens"; main listing delisted, SKU not in search)
 }
 
 _LM_PATTERNS = (
@@ -226,70 +237,113 @@ def _lm_from_ld(blocks: list, sku: str) -> dict[int, int]:
     return {}
 
 
+def _try_storefront(site: str, sku: str) -> Optional[dict]:
+    """search one Govee storefront for <sku>'s product page + lumens"""
+    try:
+        search_html = _http_get(
+            f"{site}/search?q={urllib.parse.quote(sku)}")
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            # no product hits (delisted here / not sold in this
+            # region) — an honest miss for THIS storefront
+            return None
+        log.warning("lumens lookup for %s on %s failed: %s", sku, site, e)
+        return None
+    # results appear as absolute URLs whose FIRST path segment is
+    # /products/ (ld+json / embedded JSON); requiring that excludes
+    # cdn.shopify.com image URLs like .../s/files/products/X.jpg
+    # and relative nav links. Refurb-archive pages rank after normal
+    # ones but stay candidates — they are the archive for delisted
+    # SKUs (that is where "Floor Lamp 2 / 1725 lumens" lives).
+    normal: list[str] = []
+    refurb: list[str] = []
+    for m in re.finditer(
+            r"https?://[^/\"']+(/products/[a-zA-Z0-9][a-zA-Z0-9-]*)",
+            search_html):
+        u = m.group(1)
+        bucket = refurb if "refurbished" in u else normal
+        if u not in normal and u not in refurb:
+            bucket.append(u)
+    tried = []
+    missed = ""
+    for link in (normal + refurb)[:4]:
+        url = site + link
+        try:
+            page = _http_get(url)
+        except urllib.error.HTTPError:
+            continue        # dead candidate page, try next
+        tried.append(url)
+        blocks = [b for b in _ld_json(page)
+                  if b.get("@type") in ("ProductGroup", "Product")]
+        # identity gate: the SKU must appear in the page's structured
+        # product data, NOT just anywhere — these pages embed the whole
+        # site menu (~150 SKUs), so a bare substring match false-
+        # matches. Only fall back to whole-page text if no ld blocks.
+        if blocks:
+            if not any(sku.upper() in json.dumps(b).upper()
+                       for b in blocks):
+                continue
+        elif sku.upper() not in page.upper():
+            continue
+        votes = _lm_from_ld(blocks, sku)
+        if not votes:
+            votes = _lm_votes(page)
+        if not votes:
+            # right product page, but Govee publishes no lumen figure
+            # (common for lamps/fixtures) — remember it so the UI can
+            # say "check this URL" rather than "no results"
+            if not missed:
+                missed = url
+            continue
+        top = max(votes, key=votes.get)
+        confident = len(votes) == 1 or max(votes.values()) >= 2
+        return {"lumens": top if confident else None,
+                "votes": votes.get(top, 0),
+                "sources": [url],
+                "candidates": sorted(votes)}
+    if missed:
+        return {"lumens": None, "votes": 0, "sources": [missed],
+                "candidates": []}
+    return None
+
+
 def lookup_lumens(sku: str) -> Optional[dict]:
     """
-    Ask Govee's own site for the SKU's rated lumens (privacy: the only
-    thing sent is the SKU string, to govee.com):
-      1. {GOVEE_SITE}/search?q=<sku>  -> product page links (SSR)
+    Ask Govee's OWN storefronts for the SKU's rated lumens (privacy:
+    the only thing sent is the SKU string, only to govee.com properties
+    — no search engines, no third-party DBs; none with Govee SKU->lumens
+    coverage exist anyway):
+      1. {GOVEE_SITE}/search?q=<sku>, then GOVEE_REGIONS storefronts
+         (SKUs get delisted regionally; the refurb archive keeps the
+         old pages) -> product page links (SSR)
       2. product page -> parse the published schema.org ProductGroup
          JSON-LD (spec contract); if it carries no lumens, fall back
          to voting on visible-text lumen mentions
-    Marketing copy is noisy, so: require the page to mention the SKU
-    AND either a single unanimous figure or >=2 agreeing mentions;
-    otherwise return candidates + URL for a human to confirm.
-    Cached afterwards. Returns None on network failure.
+    Marketing copy is noisy, so: require the SKU inside the page's
+    structured product data AND either a single unanimous figure or
+    >=2 agreeing mentions; otherwise return candidates + URL for a
+    human to confirm. Cached afterwards. Returns None on network
+    failure; a dict (possibly lumens=None) once every storefront has
+    answered.
     """
     if not GOVEE_SITE:
         return None
-    try:
-        search_html = _http_get(
-            f"{GOVEE_SITE}/search?q={urllib.parse.quote(sku)}")
-    except urllib.error.HTTPError as e:
-        if e.code == 404:
-            # govee.com 404s searches with no product hits (discontinued
-            # or not sold in this region) — an honest "unknown"
-            return {"lumens": None, "votes": 0, "sources": [],
-                    "candidates": []}
-        log.warning("lumens lookup for %s failed: %s", sku, e)
-        return None
-    try:
-        # results appear as absolute URLs whose FIRST path segment is
-        # /products/ (ld+json / embedded JSON); requiring that excludes
-        # cdn.shopify.com image URLs like .../s/files/products/X.jpg
-        # and relative nav links
-        links: list[str] = []
-        for m in re.finditer(
-                r"https?://[^/\"']+(/products/[a-zA-Z0-9][a-zA-Z0-9-]*)",
-                search_html):
-            u = m.group(1)
-            if "refurbished" not in u and u not in links:
-                links.append(u)
-        tried = []
-        for link in links[:3]:
-            url = GOVEE_SITE + link
-            try:
-                page = _http_get(url)
-            except urllib.error.HTTPError:
-                continue        # dead candidate page, try next
-            tried.append(url)
-            if sku.upper() not in page.upper():
-                continue        # wrong product page, try next result
-            votes = _lm_from_ld(_ld_json(page), sku)
-            if not votes:
-                votes = _lm_votes(page)
-            if not votes:
-                continue
-            top = max(votes, key=votes.get)
-            confident = len(votes) == 1 or max(votes.values()) >= 2
-            return {"lumens": top if confident else None,
-                    "votes": votes.get(top, 0),
-                    "sources": [url],
-                    "candidates": sorted(votes)}
-        return {"lumens": None, "votes": 0, "sources": tried[:1],
-                "candidates": []}
-    except Exception as e:
-        log.warning("lumens lookup for %s failed: %s", sku, e)
-        return None
+    first_miss = None
+    for site in [GOVEE_SITE] + GOVEE_REGIONS:
+        try:
+            hit = _try_storefront(site, sku)
+        except Exception as e:
+            log.warning("lumens lookup for %s on %s failed: %s",
+                        sku, site, e)
+            return None       # network problem: don't cache an unknown
+        if hit:
+            if hit["lumens"] is not None or hit["candidates"]:
+                return hit
+            if first_miss is None:
+                first_miss = hit   # page exists here, figure may
+                continue           # exist on another storefront
+    return first_miss or {"lumens": None, "votes": 0, "sources": [],
+                          "candidates": []}
 
 
 def _load_lumens_cache() -> dict:
@@ -1421,7 +1475,8 @@ def scale_auto():
                 d.lumens = r["lumens"]
                 cache[d.sku] = r["lumens"]
                 new_entries = True
-                resolved[d.ip] = f"web, {r['votes']} agreeing hits"
+                resolved[d.ip] = (f"web, {r['votes']} agreeing hits"
+                                  f" ({(r['sources'] or [''])[0]})")
             elif r:
                 cands = "/".join(map(str, r["candidates"][:3])) or "none"
                 src = r["sources"][0] if r["sources"] else "no results"

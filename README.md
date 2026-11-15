@@ -86,6 +86,7 @@ lights follow.
 | `GOVEE_PORT` / `GOVEE_HOST` | `9091` / `0.0.0.0` | web bind |
 | `GOVEE_API_KEY` | unset | when set, `X-Api-Key` header is required on write requests |
 | `GOVEE_SITE` | `https://us.govee.com` | storefront for lumens lookup; `""` disables web lookups |
+| `GOVEE_REGIONS` | eu, uk, ca, mea govee stores | extra Govee-run storefronts tried when the primary has no hit (delistings live on regionally / in the refurb archive) |
 | `GOVEE_LUMENS_CACHE` | `lumens_cache.json` next to config | persisted SKU→lumens findings, hand-editable |
 | `GOVEE_LOGLEVEL` | `INFO` | logging |
 

@@ -28,18 +28,26 @@ log_files = []
 if os.environ.get("GOVEE_RIG") != "external":
     py = sys.executable
     fake_cmds = [
-        (LOG_A, [py, os.path.join(HERE, "fake_ip.py"), "127.0.0.1", "FLOODX"]),
-        (LOG_B, [py, os.path.join(HERE, "fake_ip.py"), "127.0.0.2", "H6010"]),
-        (None,  [py, os.path.join(HERE, "fake_ip.py"), "127.0.0.3", "NOISY"]),
-        (None,  [py, os.path.join(HERE, "fake_govee_site.py")]),
+        (LOG_A, [py, os.path.join(HERE, "fake_ip.py"), "127.0.0.1", "FLOODX"], None),
+        (LOG_B, [py, os.path.join(HERE, "fake_ip.py"), "127.0.0.2", "H6010"], None),
+        (None,  [py, os.path.join(HERE, "fake_ip.py"), "127.0.0.3", "NOISY"], None),
+        (None,  [py, os.path.join(HERE, "fake_ip.py"), "127.0.0.5", "REFURBX"], None),
+        (None,  [py, os.path.join(HERE, "fake_ip.py"), "127.0.0.6", "DELISTX"], None),
+        (None,  [py, os.path.join(HERE, "fake_ip.py"), "127.0.0.7", "DECOYX"], None),
+        (None,  [py, os.path.join(HERE, "fake_govee_site.py")],
+         {"PORT": "9093", "SITE": "primary"}),
+        (None,  [py, os.path.join(HERE, "fake_govee_site.py")],
+         {"PORT": "9094", "SITE": "region"}),
     ]
-    for logfile, cmd in fake_cmds:
+    for logfile, cmd, extra_env in fake_cmds:
         fh = open(logfile, "w") if logfile else subprocess.DEVNULL
         if logfile:
             log_files.append(fh)
-        rig.append(subprocess.Popen(cmd, stderr=fh))
+        env = dict(os.environ, **(extra_env or {}))
+        rig.append(subprocess.Popen(cmd, stderr=fh, env=env))
     env = dict(os.environ,
                GOVEE_SITE="http://127.0.0.1:9093",
+               GOVEE_REGIONS="http://127.0.0.1:9094",
                GOVEE_LUMENS_CACHE=CACHE,
                GOVEE_CONFIG=os.path.join(HERE, "lookup_config.json"),
                GOVEE_PORT="9091")
@@ -75,8 +83,9 @@ if os.path.exists(CACHE):
     os.remove(CACHE)
 
 res = api("/identify", "POST")
-check("identify all three skus",
-      set(res["skus"].values()) == {"FLOODX", "H6010", "NOISY"},
+check("identify all six skus",
+      set(res["skus"].values()) == {"FLOODX", "H6010", "NOISY",
+                                    "REFURBX", "DELISTX", "DECOYX"},
       str(res["skus"]))
 
 res = api("/scale/auto", "POST", {"identify": False})
@@ -93,14 +102,31 @@ check("NOISY: disagreeing page refused, candidates surfaced",
       and "unsure" in resolved.get("127.0.0.3", "")
       and "150/1200" in resolved.get("127.0.0.3", ""),
       str(resolved.get("127.0.0.3")))
-check("anchor math: X 0.75, Y 1.0, Z untouched 1.0",
+check("REFURBX resolved via refurb archive page -> 1500",
+      by_ip["127.0.0.5"]["lumens"] == 1500
+      and "refurbished-refurbx" in str(resolved.get("127.0.0.5")),
+      str(resolved.get("127.0.0.5")))
+check("DELISTX resolved via regional storefront -> 1300",
+      by_ip["127.0.0.6"]["lumens"] == 1300
+      and "web" in resolved.get("127.0.0.6", ""),
+      str(resolved.get("127.0.0.6")))
+check("DECOYX rejected by structured-data gate (nav mention + 999lm "
+      "on wrong-SKU page must not leak)",
+      by_ip["127.0.0.7"]["lumens"] is None
+      and 999 not in (by_ip["127.0.0.7"].get("candidates") or [])
+      and by_ip["127.0.0.7"]["scale"] == 1.0,
+      str(by_ip["127.0.0.7"]))
+check("anchor math: X 0.75, Y 1.0, Z untouched, W 0.8, V 0.92",
       by_ip["127.0.0.1"]["scale"] == 0.75
       and by_ip["127.0.0.2"]["scale"] == 1.0
-      and by_ip["127.0.0.3"]["scale"] == 1.0)
+      and by_ip["127.0.0.3"]["scale"] == 1.0
+      and by_ip["127.0.0.5"]["scale"] == 0.8
+      and by_ip["127.0.0.6"]["scale"] == 0.92)
 
 cache = json.load(open(CACHE))
-check("cache persisted FLOODX: 1600 only",
-      cache == {"FLOODX": 1600}, str(cache))
+check("cache persisted resolved web finds only",
+      cache == {"FLOODX": 1600, "REFURBX": 1500, "DELISTX": 1300},
+      str(cache))
 
 mA = len(open(LOG_A).read().splitlines())
 mB = len(open(LOG_B).read().splitlines())

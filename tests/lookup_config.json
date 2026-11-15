@@ -2,7 +2,10 @@
   "devices": {
     "flood X": "127.0.0.1",
     "bulb Y": "127.0.0.2",
-    "noisy Z": "127.0.0.3"
+    "noisy Z": "127.0.0.3",
+    "refurb W": "127.0.0.5",
+    "delisted V": "127.0.0.6",
+    "decoy U": "127.0.0.7"
   },
   "rooms": {
     "bathroom": ["flood X", "bulb Y"]
