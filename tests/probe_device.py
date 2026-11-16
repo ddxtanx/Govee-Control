@@ -31,6 +31,12 @@ ap = argparse.ArgumentParser()
 ap.add_argument("--name", default="bathroom",
                 help="substring of the device name to probe")
 ap.add_argument("--url", default="http://localhost:9091")
+ap.add_argument("--ladder", default="",
+                help="optional duty ladder to eyeball the duty->light "
+                     "curve, e.g. '1,3,5,10,20,40,70,100' — each step "
+                     "holds --pause seconds so you can watch/photograph")
+ap.add_argument("--pause", type=float, default=3.0,
+                help="seconds to hold each ladder step")
 args = ap.parse_args()
 
 
@@ -105,6 +111,20 @@ else:
     print(f"  duty-0 packet: lamp reports on={rows[2][1]['on']} "
           f"bri={b0} — interpret by eye")
 print(f"  colorwc/kelvin re-ignites off lamp: {on_k}")
+
+if args.ladder:
+    print("\nDUTY LADDER (physical brightness is YOUR input here — "
+          "watch or photograph each hold):")
+    api(f"/devices/{ip}", "POST", {"on": True})
+    time.sleep(0.4)
+    for duty in (int(x) for x in args.ladder.split(",") if x.strip()):
+        api(f"/devices/{ip}", "POST", {"brightness": duty})
+        print(f"  duty {duty:>3} — hold {args.pause:g} s", flush=True)
+        time.sleep(args.pause)
+    api(f"/devices/{ip}", "POST", {"on": False})
+    print("  -> lamp turned OFF after ladder")
+    final = read_state(ip)["on"]
+
 print(f"  lamp left OFF at end: {not final}")
 if final:
     fails.append("lamp not off at end")
