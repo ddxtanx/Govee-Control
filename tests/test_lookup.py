@@ -171,6 +171,23 @@ va, vb = bri_values(LOG_A, mA), bri_values(LOG_B, mB)
 check("room 80% -> flood X raw 60", va == [60], f"A={va}")
 check("room 80% -> bulb Y raw 80", vb == [80], f"B={vb}")
 
+# duty 0 is a dead packet on real lamps -> server must power off
+mA = len(open(LOG_A).read().splitlines())
+mB = len(open(LOG_B).read().splitlines())
+api("/rooms/bathroom", "POST", {"brightness": 0})
+offA = open(LOG_A).read().splitlines()[mA:]
+offB = open(LOG_B).read().splitlines()[mB:]
+check("room 0% -> power-off packets, never a duty-0 send",
+      any("turn {'value': 0}" in l for l in offA)
+      and not any("brightness {'value': 0}" in l for l in offA)
+      and any("turn {'value': 0}" in l for l in offB),
+      f"A={offA} B={offB}")
+mA = len(open(LOG_A).read().splitlines())
+api("/rooms/bathroom", "POST", {"brightness": 1})
+lowA = bri_values(LOG_A, mA)
+check("room 1% -> flood X floored at duty 1 (lit, not off)",
+      lowA == [1], f"A={lowA}")
+
 print()
 print("RESULT:", "ALL PASS" if not fails else f"FAILURES: {fails}")
 for p in rig:

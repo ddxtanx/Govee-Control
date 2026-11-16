@@ -42,9 +42,16 @@ while True:
             state["onOff"] = data["value"]
         elif cmd == "brightness":
             state["brightness"] = data["value"]
+            # real Govee lamps re-ignite on brightness packets while
+            # off (field-proven) and ignore duty 0 (min glow) — the
+            # server must never rely on either quirk; mirror faithfully:
+            if data["value"] > 0:
+                state["onOff"] = 1
         elif cmd == "colorwc":
             state["color"] = data["color"]
             state["colorTemInKelvin"] = data.get("colorTemInKelvin", 0)
+            if state["brightness"] > 0:
+                state["onOff"] = 1
         if cmd == "devStatus":
             ctrl.sendto(
                 json.dumps({"msg": {"cmd": "devStatus", "data": state}}).encode(),

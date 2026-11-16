@@ -503,12 +503,25 @@ class Device:
 
     def set_brightness(self, brightness: int):
         brightness = int(_clamp(brightness, 0, 100))
+        if brightness == 0:
+            # real Govee lamps do not extinguish at duty 0 — the
+            # firmware clamps to a minimum glow, so a 0-brightness
+            # packet leaves them faintly lit forever. "0" from any
+            # UI/scale means OFF: use the power command.
+            self.set_power(False)
+            self.brightness = 0
+            return
         self._send("brightness", {"value": brightness})
         self.brightness = brightness
 
     def norm_brightness(self, pct: int) -> int:
-        """Raw value to send for a normalized (bulk) brightness request."""
-        return int(_clamp(round(pct * self.scale), 0, 100))
+        """Raw value to send for a normalized (bulk) brightness request.
+        Any request above zero keeps every light lit: duty 1 is a
+        Govee lamp's real minimum, while duty 0 is a dead packet
+        (firmware keeps the previous level), so floor at 1."""
+        if pct <= 0:
+            return 0
+        return int(max(1, _clamp(round(pct * self.scale), 0, 100)))
 
     def set_color(self, rgb: tuple, kelvin: int):
         """
@@ -962,16 +975,17 @@ class WakeRamp:
             self._finish(stop, ok=False, error="no devices for target")
             return
 
-        # Phase 0: dim before revealing. Brightness 0 first, then color,
-        # then power ON last — the light stays off until it's already at
-        # zero, so no flash on wake.
+        # Phase 0: start genuinely dark. Real lamps ignore duty 0
+        # (firmware min-glow), and set_brightness(0) now maps to a
+        # power-OFF packet; color is set while dark; the first step's
+        # brightness packet re-ignites the lamp at that smallest value
+        # (brightness packets light Govee lamps — that is exactly the
+        # re-ignition behaviour the off-watch guards against later).
         for d in devices:
             d.set_brightness(0)
         if k0 is not None:
             for d in devices:
                 d.set_kelvin(k0)
-        for d in devices:
-            d.set_power(True)
         log.info(
             "wake ramp start: %s (%d devices, %s min, %s->%s K)",
             room_name, len(devices), minutes, k0, k1,
@@ -980,7 +994,10 @@ class WakeRamp:
         steps = 100
         interval = (minutes * 60.0) / steps
         # watch for external power-off (lamp button / Govee app mid-ramp);
-        # checked before EVERY step's sends so a re-ignition cannot hide it
+        # checked before EVERY step's sends so a re-ignition cannot hide
+        # it. Armed only once WE have lit the lamp (brightness>0 sent) —
+        # the intentional dark start must not self-cancel.
+        armed = False
         last_check = time.monotonic()
         try:
             for step in range(1, steps + 1):
@@ -991,7 +1008,7 @@ class WakeRamp:
                 # if the user turned a light off, abort BEFORE our own
                 # brightness/color commands can re-ignite it
                 last_check = time.monotonic()
-                if self._lights_off(devices):
+                if armed and self._lights_off(devices):
                     self._abort_lights_off(devices, stop)
                     return
                 if stop.is_set():
@@ -1002,7 +1019,11 @@ class WakeRamp:
                     for d in devices:
                         d.set_kelvin(kelvin)
                 for d in devices:
-                    d.set_brightness(d.norm_brightness(bri))
+                    sent = d.norm_brightness(bri)
+                    d.set_brightness(sent)
+                    if sent > 0:
+                        armed = True   # WE lit the lamp: from here,
+                        # any off we see is the user saying no
                 with self._lock:
                     self._state["current_brightness"] = bri
                 # sleep in small slices so cancellation is prompt
@@ -1014,7 +1035,7 @@ class WakeRamp:
                     now = time.monotonic()
                     if now - last_check >= self.OFF_CHECK_INTERVAL:
                         last_check = now
-                        if self._lights_off(devices):
+                        if armed and self._lights_off(devices):
                             self._abort_lights_off(devices, stop)
                             return
                         if stop.is_set():

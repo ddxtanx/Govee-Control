@@ -84,8 +84,9 @@ while time.time() - t0 < 20:
 va, vb = bri_values(LOG_A, mA), bri_values(LOG_B, mB)
 check("ramp: A never exceeds 70, ends at 70",
       bool(va) and max(va) == 70 and va[-1] == 70, f"A tail={va[-3:]}")
-check("ramp: 100 steps + phase-0 zero, monotonic, scaled",
-      va == sorted(va) and len(va) == 101 and va[0] == 0 and va[-1] == 70,
+check("ramp: 100 steps, monotonic, scaled, starts at duty 1 "
+      "(phase-0 is a power-OFF packet now, not a duty-0 send)",
+      va == sorted(va) and len(va) == 100 and va[0] == 1 and va[-1] == 70,
       f"n={len(va)} head={va[:2]} tail={va[-2:]}")
 check("ramp: B reaches raw 100",
       bool(vb) and vb[-1] == 100, f"B tail={vb[-3:]}")
